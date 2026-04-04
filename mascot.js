@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Draggable Mascot Overlay
 // @namespace    mascot.overlay.final.android
-// @version      11.0
+// @version      12.0
 // @description  CSP-safe floating mascot with GM cache, drag+snap, flicker, beautiful in-page settings panel
 // @match        *://*/*
 // @run-at       document-idle
@@ -116,6 +116,10 @@ img.flicker-in { animation: flicker 600ms linear 1 forwards; }
 /* ── Mascot wrapper (glow scope) ── */
 #mwrap { position: relative; width: 100%; }
 
+#container.flip-panel {
+    flex-direction: column-reverse;
+}
+
 /* ── Mascot image ── */
 #mwrap img {
     width: 100%;
@@ -162,6 +166,11 @@ img.flicker-in { animation: flicker 600ms linear 1 forwards; }
     display: flex;
     animation: panel-in 0.18s cubic-bezier(.22,.68,0,1.2) forwards;
 }
+#container.flip-panel #panel {
+    border-radius: 14px 14px 0 0;
+    border-top: 1px solid rgba(255,255,255,0.07);
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+}
 
 /* ── Name label ── */
 .pname {
@@ -180,6 +189,7 @@ img.flicker-in { animation: flicker 600ms linear 1 forwards; }
     display: flex;
     align-items: center;
     gap: 4px;
+    flex-wrap: wrap;
 }
 
 /* ── Icon buttons ── */
@@ -220,7 +230,7 @@ img.flicker-in { animation: flicker 600ms linear 1 forwards; }
 
 /* ── Dropdown ── */
 .msel {
-    flex: 1;
+    flex: 1 1 170px;
     min-width: 0;
     height: 26px;
     background: rgba(255,255,255,0.055);
@@ -264,6 +274,32 @@ img.flicker-in { animation: flicker 600ms linear 1 forwards; }
     height: 16px;
     background: rgba(255,255,255,0.09);
     flex-shrink: 0;
+}
+
+@media (max-width: 640px) {
+    #panel {
+        gap: 8px;
+        padding: 10px;
+    }
+    .pname {
+        font-size: 10px;
+        letter-spacing: .6px;
+    }
+    .brow {
+        gap: 6px;
+    }
+    .btn {
+        width: 32px;
+        height: 30px;
+    }
+    .msel {
+        flex-basis: 100%;
+        height: 30px;
+        font-size: 12px;
+    }
+    .rrow {
+        gap: 9px;
+    }
 }
 
 `;
@@ -313,6 +349,7 @@ function applyMascot(key) {
         img.classList.add("flicker-in");
     };
     syncPanelState();
+    updateGlowVisibility();
 }
 
 function syncPanelState() {
@@ -416,6 +453,7 @@ document.addEventListener("touchend", endDrag);
 
 /* ─── SETTINGS PANEL ─── */
 let panelOpen = false;
+let glow = null;
 
 // SVG icon set (14×14, stroke-only)
 const IC = {
@@ -424,9 +462,75 @@ const IC = {
     resize: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><polyline points="17 8 21 12 17 16"/></svg>`,
     add:    `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`,
     del:    `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M9 6V4h6v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>`,
+    sync:   `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-15.5-6.4"/><polyline points="3 4 5 8 9 6"/><path d="M3 12a9 9 0 0 0 15.5 6.4"/><polyline points="21 20 19 16 15 18"/></svg>`,
     close:  `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
     spin:   `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-9-9"/></svg>`,
 };
+
+function allMascotData() {
+    const out = {};
+    GM_listValues()
+        .filter(k => k.startsWith(CFG.prefix))
+        .forEach(k => { out[k] = GM_getValue(k); });
+    return out;
+}
+
+function exportImportMascots() {
+    const blob = JSON.stringify(allMascotData(), null, 2);
+    const input = prompt(
+        "Export/Import mascot_* JSON.\n" +
+        "• Copy this text for backup/export.\n" +
+        "• To import, replace with JSON and press OK.\n" +
+        "• Press Cancel to close.",
+        blob
+    );
+    if (input == null) return;
+    const next = input.trim();
+    if (!next || next === blob.trim()) return;
+
+    let parsed;
+    try {
+        parsed = JSON.parse(next);
+    } catch {
+        alert("Invalid JSON. Import canceled.");
+        return;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        alert("Import payload must be a JSON object.");
+        return;
+    }
+
+    const entries = Object.entries(parsed).filter(([k]) => k.startsWith(CFG.prefix));
+    if (!entries.length) {
+        alert("No mascot_* keys found in payload.");
+        return;
+    }
+    if (!confirm(`Import ${entries.length} mascot_* keys? Existing keys with same names will be overwritten.`)) return;
+    entries.forEach(([k, v]) => GM_setValue(k, v));
+
+    const keys = getKeys();
+    if (!keys.includes(state.activeMascotKey)) {
+        const first = keys[0] || null;
+        state.activeMascotKey = first;
+        saveState({ activeMascotKey: first });
+    }
+    if (state.activeMascotKey) applyMascot(state.activeMascotKey);
+    syncPanelState();
+}
+
+function updatePanelPlacement() {
+    if (!panelOpen) return;
+    const cr = container.getBoundingClientRect();
+    const panelH = panel.offsetHeight;
+    const belowSpace = innerHeight - cr.bottom;
+    container.classList.toggle("flip-panel", belowSpace < panelH + 12);
+}
+
+function updateGlowVisibility() {
+    if (!glow) return;
+    const locked = container.style.pointerEvents === "none";
+    glow.classList.toggle("visible", !locked && !!state.activeMascotKey);
+}
 
 function mkBtn(extraClass, icon, title) {
     const b = document.createElement("button");
@@ -556,7 +660,15 @@ function buildPanel() {
             state.activeMascotKey = null;
             saveState({ activeMascotKey: null });
             syncPanelState();
+            updateGlowVisibility();
         }
+    };
+
+    /* Export/Import */
+    const bSync = mkBtn("", IC.sync, "Export / Import mascot_* JSON");
+    bSync.onclick = e => {
+        e.stopPropagation();
+        exportImportMascots();
     };
 
     /* Close */
@@ -566,7 +678,7 @@ function buildPanel() {
         closePanel();
     };
 
-    brow.append(bPrev, bNext, sel, bResize, sep, bAdd, bDel, bClose);
+    brow.append(bPrev, bNext, sel, bResize, sep, bAdd, bDel, bSync, bClose);
     panel.append(nameEl, brow, rrow);
 }
 
@@ -575,13 +687,17 @@ function openPanel() {
     buildPanel();
     panel.classList.add("open");
     panelOpen = true;
+    updatePanelPlacement();
     /* Ensure container is interactive while panel is open */
     container.style.pointerEvents = "auto";
+    updateGlowVisibility();
 }
 
 function closePanel() {
     panel.classList.remove("open");
     panelOpen = false;
+    container.classList.remove("flip-panel");
+    updateGlowVisibility();
 }
 
 /* ─── CLICK-THROUGH LOCK SYSTEM ─── */
@@ -602,6 +718,7 @@ function closePanel() {
         container.style.cursor = "default";
         /* Always keep the panel itself tappable */
         panel.style.pointerEvents = "auto";
+        updateGlowVisibility();
     }
 
     function unlock() {
@@ -610,6 +727,7 @@ function closePanel() {
         container.style.pointerEvents = "auto";
         container.style.cursor = "grab";
         scheduleLock();
+        updateGlowVisibility();
     }
 
     function scheduleLock() {
@@ -651,15 +769,16 @@ function closePanel() {
     if (mwrap.__mascotGlow__) return;
     mwrap.__mascotGlow__ = true;
 
-    const glow = document.createElement("div");
+    glow = document.createElement("div");
     glow.className = "glow";
     mwrap.appendChild(glow);
 
-    new MutationObserver(() => {
-        const locked = container.style.pointerEvents === "none";
-        glow.classList.toggle("visible", !locked);
-    }).observe(container, { attributes: true, attributeFilter: ["style"] });
+    new MutationObserver(updateGlowVisibility)
+        .observe(container, { attributes: true, attributeFilter: ["style"] });
+    updateGlowVisibility();
 })();
+
+window.addEventListener("resize", updatePanelPlacement);
 
 /* ─── SINGLE GM MENU ENTRY ─── */
 GM_registerMenuCommand("⚙️ Mascot Settings", openPanel);
