@@ -135,6 +135,7 @@ const playlistRuntime = {
         this.playlist = pl;
         this.idx      = 0;
         this.usedIndices = [];
+        saveState({ activePlaylistKey: CFG.playlistPrefix + pl.name });
         dbg("playlist.start()", pl.name, "order=", pl.order, "items=", pl.items.length);
         this._playNext();
     },
@@ -170,6 +171,7 @@ const playlistRuntime = {
         this.playlist = null;
         this.idx      = 0;
         this.usedIndices = [];
+        saveState({ activePlaylistKey: null });
         dbg("playlist.stop()");
         updatePlaylistProgressUI(-1);
     },
@@ -665,11 +667,36 @@ try {
     if (!keys.length) {
         syncPlaceholder();
     } else {
-        if (!keys.includes(state.activeMascotKey)) {
-            state.activeMascotKey = keys[0];
-            saveState({ activeMascotKey: keys[0] });
+        // Resume playlist if one was active before the page refresh
+        const savedPlKey = state.activePlaylistKey;
+        if (savedPlKey) {
+            try {
+                const pl = JSON.parse(GM_getValue(savedPlKey, "null"));
+                if (pl && pl.items && pl.items.length) {
+                    const validKeys = new Set(keys);
+                    pl.items = pl.items.filter(item => validKeys.has(item.key));
+                    if (pl.items.length) {
+                        dbg("Auto-resuming playlist on load:", savedPlKey);
+                        playlistRuntime.start(pl);
+                    } else {
+                        saveState({ activePlaylistKey: null });
+                        applyMascot(state.activeMascotKey || keys[0]);
+                    }
+                } else {
+                    saveState({ activePlaylistKey: null });
+                    applyMascot(state.activeMascotKey || keys[0]);
+                }
+            } catch(e) {
+                saveState({ activePlaylistKey: null });
+                applyMascot(state.activeMascotKey || keys[0]);
+            }
+        } else {
+            if (!keys.includes(state.activeMascotKey)) {
+                state.activeMascotKey = keys[0];
+                saveState({ activeMascotKey: keys[0] });
+            }
+            applyMascot(state.activeMascotKey);
         }
-        applyMascot(state.activeMascotKey);
     }
 } catch (e) { syncPlaceholder(); }
 
