@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Draggable Mascot Overlay
 // @namespace    mascot.overlay.android.v13
-// @version      13.2
+// @version      13.3
 // @description  Floating mascot — tap placeholder to open settings on first run; single GM menu entry
 // @match        *://*/*
 // @run-at       document-idle
@@ -20,18 +20,11 @@
 /* ═══════════════════════════════════════════
    SINGLETON
 ═══════════════════════════════════════════ */
-if (window.__MASCOT_OVERLAY_LOADED__) return;
-window.__MASCOT_OVERLAY_LOADED__ = true;
-
-/* ═══════════════════════════════════════════
-   REGISTER GM MENU FIRST (before anything can fail)
-═══════════════════════════════════════════ */
-let _openPanelRef = null;  // will be set later
-try {
-    GM_registerMenuCommand("⚙️ Mascot Settings", () => _openPanelRef?.());
-} catch (e) {
-    console.warn("[Mascot] GM_registerMenuCommand failed:", e);
+if (window.__MASCOT_OVERLAY_LOADED__) {
+    console.log("[Mascot] Singleton guard triggered — skipping reinit");
+    return;
 }
+window.__MASCOT_OVERLAY_LOADED__ = true;
 
 /* ═══════════════════════════════════════════
    CONFIG
@@ -44,46 +37,102 @@ const CFG = {
     stateKey:      "mascot_overlay_state_final",
     sizeKey:       "mascot_overlay_size_vw",
     prefix:        "mascot_",
+    debugKey:      "mascot_debug_enabled",   // ← persisted debug flag
 };
+
+/* ═══════════════════════════════════════════
+   DEBUG LOGGING
+   • Toggle via GM menu or:
+       GM_setValue("mascot_debug_enabled", true)  → enable
+       GM_setValue("mascot_debug_enabled", false) → disable
+   • Logs appear as [Mascot DBG] in the browser console.
+═══════════════════════════════════════════ */
+let DEBUG = false;
+try { DEBUG = !!GM_getValue(CFG.debugKey, false); } catch (e) {}
+
+const dbg     = (...a) => { if (DEBUG) console.log(  "%c[Mascot DBG]", "color:#89b4fa;font-weight:600", ...a); };
+const dbgWarn = (...a) => { if (DEBUG) console.warn( "%c[Mascot DBG]", "color:#f9e2af;font-weight:600", ...a); };
+const dbgErr  = (...a) => { if (DEBUG) console.error("%c[Mascot DBG]", "color:#f38ba8;font-weight:600", ...a); };
+
+dbg("Script initialising", { version: "13.3", url: location.href, DEBUG });
+
+/* ═══════════════════════════════════════════
+   REGISTER GM MENU FIRST (before anything can fail)
+═══════════════════════════════════════════ */
+let _openPanelRef = null;  // will be set later
+try {
+    GM_registerMenuCommand("⚙️ Mascot Settings", () => {
+        dbg("GM menu → openPanel()");
+        _openPanelRef?.();
+    });
+    GM_registerMenuCommand(`${DEBUG ? "🔕" : "🔍"} Debug Logging: ${DEBUG ? "ON (click to disable)" : "OFF (click to enable)"}`, () => {
+        DEBUG = !DEBUG;
+        try { GM_setValue(CFG.debugKey, DEBUG); } catch (e) {}
+        console.log(`[Mascot] Debug logging ${DEBUG ? "ENABLED ✅" : "DISABLED ❌"} — reload page to refresh menu label`);
+    });
+    dbg("GM menu commands registered");
+} catch (e) {
+    console.warn("[Mascot] GM_registerMenuCommand failed:", e);
+}
 
 /* ═══════════════════════════════════════════
    STATE
 ═══════════════════════════════════════════ */
 function loadState() {
     try {
-        return GM_getValue(CFG.stateKey, {
+        const s = GM_getValue(CFG.stateKey, {
             position: { left: CFG.defaultLeft, top: null },
             activeMascotKey: null
         });
+        dbg("loadState()", s);
+        return s;
     } catch (e) {
+        dbgErr("loadState() failed — using defaults", e);
         return { position: { left: CFG.defaultLeft, top: null }, activeMascotKey: null };
     }
 }
 function saveState(patch) {
     try {
-        GM_setValue(CFG.stateKey, { ...loadState(), ...patch });
+        const next = { ...loadState(), ...patch };
+        GM_setValue(CFG.stateKey, next);
+        dbg("saveState() patch=", patch, "→ saved=", next);
     } catch (e) {
         console.warn("[Mascot] saveState failed:", e);
+        dbgErr("saveState() threw", e);
     }
 }
 const state = loadState();
+dbg("Initial state loaded:", state);
 
 /* ═══════════════════════════════════════════
    NETWORK
 ═══════════════════════════════════════════ */
 function fetchBlob(url) {
+    dbg("fetchBlob() →", url);
     return new Promise((res, rej) =>
         GM_xmlhttpRequest({
             method: "GET", url, responseType: "blob",
-            onload:  r => r.status === 200 ? res(r.response) : rej(new Error("HTTP " + r.status)),
-            onerror: rej
+            onload: r => {
+                if (r.status === 200) {
+                    dbg("fetchBlob() ✓ status=200 size≈", r.response?.size, "bytes");
+                    res(r.response);
+                } else {
+                    dbgErr("fetchBlob() ✗ HTTP", r.status, url);
+                    rej(new Error("HTTP " + r.status));
+                }
+            },
+            onerror: err => { dbgErr("fetchBlob() network error", err); rej(err); }
         })
     );
 }
 function toBase64(blob) {
+    dbg("toBase64() blob size=", blob?.size);
     return new Promise(res => {
         const r = new FileReader();
-        r.onloadend = () => res(r.result);
+        r.onloadend = () => {
+            dbg("toBase64() done, dataURL length=", r.result?.length);
+            res(r.result);
+        };
         r.readAsDataURL(blob);
     });
 }
@@ -94,24 +143,32 @@ function toBase64(blob) {
 const getKeys = () => {
     try {
         const vals = typeof GM_listValues === 'function' ? GM_listValues() : [];
-        return (vals || []).filter(k => k.startsWith(CFG.prefix));
+        const keys = (vals || []).filter(k => k.startsWith(CFG.prefix)
+                                           && k !== CFG.stateKey
+                                           && k !== CFG.sizeKey
+                                           && k !== CFG.debugKey);
+        dbg("getKeys() →", keys);
+        return keys;
     } catch (e) {
         console.warn("[Mascot] getKeys failed:", e);
+        dbgErr("getKeys() threw", e);
         return [];
     }
 };
 const getName  = k  => k ? k.slice(CFG.prefix.length) : "";
 const cycleKey = (cur, dir) => {
     const k = getKeys();
-    if (!k.length) return null;
+    if (!k.length) { dbgWarn("cycleKey() — no keys, returning null"); return null; }
     let i = k.indexOf(cur);
-    i = i < 0 ? 0 : (i + dir + k.length) % k.length;
-    return k[i];
+    const next = k[i < 0 ? 0 : (i + dir + k.length) % k.length];
+    dbg(`cycleKey() cur="${cur}" dir=${dir} → "${next}"`);
+    return next;
 };
 
 /* ═══════════════════════════════════════════
    SHADOW DOM
 ═══════════════════════════════════════════ */
+dbg("Building Shadow DOM");
 const host = document.createElement("div");
 host.style.cssText = "position:fixed;inset:0;z-index:2147483647;pointer-events:none;overflow:visible;";
 const shadow = host.attachShadow({ mode: "open" });
@@ -410,13 +467,16 @@ panel.id = "panel";
 
 container.append(mwrap, placeholder, panel);
 shadow.appendChild(container);
+dbg("DOM structure built and appended to shadow root");
 
 /* ── Saved position + size ── */
 let savedVw = CFG.defaultVw;
 try {
     savedVw = GM_getValue(CFG.sizeKey, CFG.defaultVw);
+    dbg("Loaded saved size:", savedVw, "vw");
 } catch (e) {
     console.warn("[Mascot] Could not load size:", e);
+    dbgErr("Size load failed, using default:", CFG.defaultVw);
 }
 container.style.cssText = `
     width: ${savedVw}vw;
@@ -426,6 +486,12 @@ container.style.cssText = `
         ? `top:${state.position.top}px;`
         : `bottom:${CFG.defaultBottom}px;`}
 `;
+dbg("Container initial style set:", {
+    width: savedVw + "vw",
+    left: state.position.left,
+    top: state.position.top,
+    bottom: state.position.top != null ? null : CFG.defaultBottom
+});
 
 /* ═══════════════════════════════════════════
    PLACEHOLDER VISIBILITY
@@ -434,52 +500,71 @@ function syncPlaceholder() {
     const empty = !getKeys().length;
     placeholder.classList.toggle("visible", empty);
     placeholder.style.pointerEvents = empty ? "auto" : "none";
+    dbg("syncPlaceholder() empty=", empty);
 }
 
 /* ═══════════════════════════════════════════
    MASCOT APPLICATION
 ═══════════════════════════════════════════ */
 function applyMascot(key) {
+    dbg("applyMascot() key=", key);
     let src;
     try {
         src = GM_getValue(key);
     } catch (e) {
         console.warn("[Mascot] Could not load mascot:", e);
+        dbgErr("applyMascot() GM_getValue threw for key=", key, e);
         return;
     }
-    if (!src) return;
+    if (!src) {
+        dbgWarn("applyMascot() no data found for key=", key);
+        return;
+    }
+    dbg("applyMascot() src length=", src.length, "chars — setting img.src");
     state.activeMascotKey = key;
     saveState({ activeMascotKey: key });
     img.style.opacity = "0";
     img.src = src;
     img.onload = () => {
+        dbg("applyMascot() img.onload fired — triggering flicker-in");
         img.classList.remove("flicker-in");
         void img.offsetWidth;
         img.classList.add("flicker-in");
+    };
+    img.onerror = () => {
+        dbgErr("applyMascot() img.onerror — dataURL may be corrupt for key=", key);
     };
     syncPlaceholder();
     refreshPanel();
 }
 
 /* ── Initial load ── */
+dbg("Running initial mascot load...");
 try {
     const keys = getKeys();
+    dbg("Initial keys found:", keys);
     if (!keys.length) {
+        dbg("No mascots stored → showing placeholder");
         syncPlaceholder();
     } else {
         if (!keys.includes(state.activeMascotKey)) {
+            dbgWarn("Saved activeMascotKey not in keys — resetting to first:", keys[0]);
             state.activeMascotKey = keys[0];
             saveState({ activeMascotKey: keys[0] });
         }
+        dbg("Applying active mascot on load:", state.activeMascotKey);
         applyMascot(state.activeMascotKey);
     }
 } catch (e) {
     console.warn("[Mascot] Initial load error:", e);
+    dbgErr("Initial load threw", e);
     syncPlaceholder();
 }
 
 document.addEventListener("visibilitychange", () => {
-    img.style.animationPlayState = document.hidden ? "paused" : "running";
+    const hidden = document.hidden;
+    dbg("visibilitychange — hidden=", hidden, "→ pausing/resuming animation");
+    img.style.animationPlayState = hidden ? "paused" : "running";
 });
 
 /* ═══════════════════════════════════════════
@@ -497,27 +582,37 @@ function inInteractive(node) {
 }
 
 function startDrag(x, y, target) {
-    if (inInteractive(target)) return;
+    if (inInteractive(target)) {
+        dbg("startDrag() blocked — target is interactive element");
+        return;
+    }
     dragging = true; sx = x; sy = y;
     sl = container.offsetLeft; st = container.offsetTop;
+    dbg("startDrag() x=", x, "y=", y, "sl=", sl, "st=", st);
 }
 function moveDrag(x, y) {
     if (!dragging) return;
-    container.style.left   = (sl + x - sx) + "px";
-    container.style.top    = (st + y - sy) + "px";
+    const newL = sl + x - sx;
+    const newT = st + y - sy;
+    container.style.left   = newL + "px";
+    container.style.top    = newT + "px";
     container.style.bottom = "auto";
+    // only log every ~10px to avoid console flood
+    if (Math.abs((x - sx) % 10) < 1) dbg("moveDrag() left=", newL, "top=", newT);
 }
 function endDrag() {
     if (!dragging) return;
     dragging = false;
     const r = container.getBoundingClientRect();
     let l = r.left, t = r.top;
-    if (l                      < CFG.snapDist) l = 0;
-    if (innerWidth  - r.right  < CFG.snapDist) l = innerWidth  - r.width;
-    if (t                      < CFG.snapDist) t = 0;
-    if (innerHeight - r.bottom < CFG.snapDist) t = innerHeight - r.height;
+    const snapped = { left: false, right: false, top: false, bottom: false };
+    if (l                      < CFG.snapDist) { l = 0;                      snapped.left   = true; }
+    if (innerWidth  - r.right  < CFG.snapDist) { l = innerWidth  - r.width;  snapped.right  = true; }
+    if (t                      < CFG.snapDist) { t = 0;                      snapped.top    = true; }
+    if (innerHeight - r.bottom < CFG.snapDist) { t = innerHeight - r.height; snapped.bottom = true; }
     container.style.left = l + "px";
     container.style.top  = t + "px";
+    dbg("endDrag() final position l=", l, "t=", t, "snapped=", snapped);
     saveState({ position: { left: l, top: t } });
 }
 
@@ -549,7 +644,12 @@ let isUnlocked = false;
     let lockTimer, pressTimer, pressing = false;
 
     function lock() {
-        if (panelOpen) { scheduleLock(); return; }
+        if (panelOpen) {
+            dbg("lock() deferred — panel is open, rescheduling");
+            scheduleLock();
+            return;
+        }
+        dbg("lock() — locking container");
         isUnlocked = false;
         container.classList.remove("unlocked");
         container.classList.remove("panel-active");
@@ -559,7 +659,11 @@ let isUnlocked = false;
     }
 
     function unlock() {
-        if (isUnlocked) return;
+        if (isUnlocked) {
+            dbg("unlock() — already unlocked, skipping");
+            return;
+        }
+        dbg("unlock() — unlocking container, scheduling auto-lock in", LOCK_DELAY, "ms");
         isUnlocked = true;
         container.classList.add("unlocked");
         container.style.cursor = "grab";
@@ -569,6 +673,7 @@ let isUnlocked = false;
     function scheduleLock() {
         clearTimeout(lockTimer);
         lockTimer = setTimeout(lock, LOCK_DELAY);
+        dbg("scheduleLock() — lock in", LOCK_DELAY, "ms");
     }
 
     function inside(x, y) {
@@ -580,9 +685,19 @@ let isUnlocked = false;
         if (isUnlocked || !inside(x, y)) return;
         pressing = true;
         clearTimeout(pressTimer);
-        pressTimer = setTimeout(() => { if (pressing) unlock(); }, LONG_PRESS);
+        dbg("startPress() — long-press timer started, fires in", LONG_PRESS, "ms");
+        pressTimer = setTimeout(() => {
+            if (pressing) {
+                dbg("startPress() — long-press threshold reached → unlock()");
+                unlock();
+            }
+        }, LONG_PRESS);
     }
-    function cancelPress() { pressing = false; clearTimeout(pressTimer); }
+    function cancelPress() {
+        if (pressing) dbg("cancelPress() — press cancelled");
+        pressing = false;
+        clearTimeout(pressTimer);
+    }
 
     document.addEventListener("touchstart", e => startPress(e.touches[0].clientX, e.touches[0].clientY), true);
     document.addEventListener("touchmove",  cancelPress, true);
@@ -593,9 +708,14 @@ let isUnlocked = false;
     let lastPos = "";
     setInterval(() => {
         const pos = container.style.left + container.style.top;
-        if (isUnlocked && pos !== lastPos) { lastPos = pos; scheduleLock(); }
+        if (isUnlocked && pos !== lastPos) {
+            dbg("Position change detected while unlocked — resetting lock timer");
+            lastPos = pos;
+            scheduleLock();
+        }
     }, 300);
 
+    dbg("lockSystem() initialised — calling lock()");
     lock();
 })();
 
@@ -604,10 +724,16 @@ let isUnlocked = false;
 ═══════════════════════════════════════════ */
 function exportMascots() {
     const keys = getKeys();
+    dbg("exportMascots() keys=", keys);
     if (!keys.length) { alert("No mascots saved yet."); return; }
     const payload = {};
     keys.forEach(k => {
-        try { payload[k] = GM_getValue(k); } catch(e) {}
+        try {
+            payload[k] = GM_getValue(k);
+            dbg("exportMascots() included key=", k, "dataURL length=", payload[k]?.length);
+        } catch(e) {
+            dbgErr("exportMascots() failed to read key=", k, e);
+        }
     });
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url  = URL.createObjectURL(blob);
@@ -618,9 +744,11 @@ function exportMascots() {
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 2000);
+    dbg("exportMascots() download triggered, filename=", a.download);
 }
 
 function importMascots(afterImport) {
+    dbg("importMascots() — opening file picker");
     const input = document.createElement("input");
     input.type = "file";
     input.accept = ".json,application/json";
@@ -629,23 +757,38 @@ function importMascots(afterImport) {
     input.onchange = async () => {
         const file = input.files[0];
         input.remove();
-        if (!file) return;
+        if (!file) { dbgWarn("importMascots() — no file selected"); return; }
+        dbg("importMascots() file selected:", file.name, "size=", file.size, "bytes");
         try {
             const data = JSON.parse(await file.text());
+            dbg("importMascots() parsed JSON keys:", Object.keys(data));
             let count = 0;
             for (const [k, v] of Object.entries(data)) {
                 if (k.startsWith(CFG.prefix) && typeof v === "string") {
-                    try { GM_setValue(k, v); count++; } catch(e) {}
+                    try {
+                        GM_setValue(k, v);
+                        dbg("importMascots() stored key=", k, "dataURL length=", v.length);
+                        count++;
+                    } catch(e) {
+                        dbgErr("importMascots() GM_setValue failed for key=", k, e);
+                    }
+                } else {
+                    dbgWarn("importMascots() skipped invalid entry key=", k, "type=", typeof v);
                 }
             }
+            dbg("importMascots() done — imported", count, "mascot(s)");
             alert(`Imported ${count} mascot(s).`);
             if (!state.activeMascotKey || !GM_getValue(state.activeMascotKey)) {
                 const keys = getKeys();
-                if (keys.length) applyMascot(keys[0]);
+                if (keys.length) {
+                    dbg("importMascots() auto-applying first key:", keys[0]);
+                    applyMascot(keys[0]);
+                }
             }
             syncPlaceholder();
             afterImport?.();
-        } catch {
+        } catch (err) {
+            dbgErr("importMascots() parse/process error:", err);
             alert("Import failed — make sure it's a valid mascot backup JSON.");
         }
     };
@@ -685,9 +828,11 @@ function mkSep() {
    PANEL BUILDER
 ═══════════════════════════════════════════ */
 function buildPanel() {
+    dbg("buildPanel() — rebuilding panel UI");
     panel.innerHTML = "";
 
     const isEmpty = !getKeys().length;
+    dbg("buildPanel() isEmpty=", isEmpty, "activeMascotKey=", state.activeMascotKey);
 
     if (isEmpty) {
         const hint = document.createElement("div");
@@ -707,6 +852,7 @@ function buildPanel() {
     const bPrev = mkBtn(IC.prev, "Previous");
     bPrev.onclick = e => {
         e.stopPropagation();
+        dbg("bPrev clicked — cycleKey(-1) from", state.activeMascotKey);
         const k = cycleKey(state.activeMascotKey, -1);
         if (k) applyMascot(k);
     };
@@ -714,6 +860,7 @@ function buildPanel() {
     const bNext = mkBtn(IC.next, "Next");
     bNext.onclick = e => {
         e.stopPropagation();
+        dbg("bNext clicked — cycleKey(+1) from", state.activeMascotKey);
         const k = cycleKey(state.activeMascotKey, 1);
         if (k) applyMascot(k);
     };
@@ -721,7 +868,11 @@ function buildPanel() {
     const sel = document.createElement("select");
     sel.className = "msel";
     populateSel(sel);
-    sel.onchange = e => { e.stopPropagation(); if (sel.value) applyMascot(sel.value); };
+    sel.onchange = e => {
+        e.stopPropagation();
+        dbg("select changed → applyMascot(", sel.value, ")");
+        if (sel.value) applyMascot(sel.value);
+    };
 
     const srow = document.createElement("div");
     srow.className = "srow";
@@ -734,6 +885,7 @@ function buildPanel() {
     slider.oninput = () => {
         container.style.width = slider.value + "vw";
         rvlbl.textContent = slider.value + "vw";
+        dbg("slider oninput →", slider.value, "vw");
         try { GM_setValue(CFG.sizeKey, +slider.value); } catch(e) {}
     };
     srow.append(slider, rvlbl);
@@ -743,6 +895,7 @@ function buildPanel() {
         e.stopPropagation();
         const open = srow.classList.toggle("open");
         bResize.classList.toggle("lit", open);
+        dbg("bResize clicked — srow open=", open);
         if (open) {
             slider.value = Math.round(parseFloat(container.style.width) || CFG.defaultVw);
             rvlbl.textContent = slider.value + "vw";
@@ -751,7 +904,11 @@ function buildPanel() {
     };
 
     const bClose = mkBtn(IC.close, "Close");
-    bClose.onclick = e => { e.stopPropagation(); closePanel(); };
+    bClose.onclick = e => {
+        e.stopPropagation();
+        dbg("bClose clicked → closePanel()");
+        closePanel();
+    };
 
     row1.append(bPrev, bNext, sel, bResize, bClose);
 
@@ -762,22 +919,33 @@ function buildPanel() {
     bAdd.onclick = async e => {
         e.stopPropagation();
         const url = prompt("Image URL (direct link to PNG/GIF/WebP/JPG):");
-        if (!url?.trim()) return;
+        if (!url?.trim()) { dbgWarn("bAdd — no URL entered"); return; }
         let name = prompt("Name for this mascot:");
-        if (!name?.trim()) return;
+        if (!name?.trim()) { dbgWarn("bAdd — no name entered"); return; }
         name = name.trim().replace(/[^\w]/g, "_");
         const key = CFG.prefix + name;
+        dbg("bAdd — url=", url.trim(), "name=", name, "key=", key);
         try {
-            if (GM_getValue(key)) { alert(`"${name}" already exists.`); return; }
+            if (GM_getValue(key)) {
+                dbgWarn("bAdd — key already exists:", key);
+                alert(`"${name}" already exists.`);
+                return;
+            }
         } catch(e) {}
 
         bAdd.innerHTML = IC.spin;
         bAdd.classList.add("spin");
         try {
-            GM_setValue(key, await toBase64(await fetchBlob(url.trim())));
+            dbg("bAdd — fetching blob...");
+            const blob = await fetchBlob(url.trim());
+            dbg("bAdd — converting to base64...");
+            const b64 = await toBase64(blob);
+            GM_setValue(key, b64);
+            dbg("bAdd — saved, applying mascot key=", key);
             applyMascot(key);
             buildPanel();
         } catch (err) {
+            dbgErr("bAdd — fetch/save failed:", err);
             alert("Could not fetch that image. Check the URL and try again.");
             bAdd.innerHTML = IC.add;
             bAdd.classList.remove("spin");
@@ -788,13 +956,20 @@ function buildPanel() {
     bDel.onclick = e => {
         e.stopPropagation();
         const k = state.activeMascotKey;
+        dbg("bDel clicked — activeMascotKey=", k);
         if (!k) { alert("No mascot is active."); return; }
-        if (!confirm(`Delete "${getName(k)}"? This cannot be undone.`)) return;
+        if (!confirm(`Delete "${getName(k)}"? This cannot be undone.`)) {
+            dbg("bDel — user cancelled delete");
+            return;
+        }
         const nxt = cycleKey(k, 1);
-        try { GM_deleteValue(k); } catch(e) {}
+        dbg("bDel — deleting key=", k, "next would be=", nxt);
+        try { GM_deleteValue(k); } catch(e) { dbgErr("bDel — GM_deleteValue failed:", e); }
         if (nxt && nxt !== k) {
+            dbg("bDel — applying next mascot:", nxt);
             applyMascot(nxt);
         } else {
+            dbg("bDel — no remaining mascots — clearing img and state");
             img.src = ""; img.style.opacity = "0";
             state.activeMascotKey = null;
             saveState({ activeMascotKey: null });
@@ -804,20 +979,27 @@ function buildPanel() {
     };
 
     const bExp = mkBtn(IC.export, "Export all mascots");
-    bExp.onclick = e => { e.stopPropagation(); exportMascots(); };
+    bExp.onclick = e => {
+        e.stopPropagation();
+        dbg("bExp clicked → exportMascots()");
+        exportMascots();
+    };
 
     const bImp = mkBtn(IC.import, "Import from JSON");
     bImp.onclick = e => {
         e.stopPropagation();
+        dbg("bImp clicked → importMascots()");
         importMascots(() => { syncPlaceholder(); buildPanel(); });
     };
 
     row2.append(bAdd, bDel, mkSep(), bExp, bImp);
     panel.append(row1, srow, row2);
+    dbg("buildPanel() complete");
 }
 
 function populateSel(sel) {
     const keys = getKeys();
+    dbg("populateSel() keys=", keys, "active=", state.activeMascotKey);
     sel.innerHTML = "";
     if (!keys.length) {
         const o = document.createElement("option");
@@ -834,7 +1016,11 @@ function populateSel(sel) {
 }
 
 function refreshPanel() {
-    if (!panelOpen) return;
+    if (!panelOpen) {
+        dbg("refreshPanel() — panel not open, skipping");
+        return;
+    }
+    dbg("refreshPanel() — updating name label and select");
     const nameEl = panel.querySelector(".pname");
     if (nameEl) nameEl.textContent = getName(state.activeMascotKey) || "—";
     const sel = panel.querySelector(".msel");
@@ -848,18 +1034,24 @@ function repositionPanel() {
     const r   = container.getBoundingClientRect();
     const flip = r.bottom > innerHeight * 0.55;
     panel.classList.toggle("flip", flip);
-
-    if (r.left + 210 > innerWidth - 8) {
+    const rightOverflow = r.left + 210 > innerWidth - 8;
+    if (rightOverflow) {
         panel.style.left = "auto";
         panel.style.right = "0";
     } else {
         panel.style.left = "0";
         panel.style.right = "auto";
     }
+    dbg("repositionPanel() flip=", flip, "rightOverflow=", rightOverflow,
+        "containerRect:", { left: Math.round(r.left), bottom: Math.round(r.bottom) });
 }
 
 function openPanel() {
-    if (panelOpen) return;
+    if (panelOpen) {
+        dbg("openPanel() — already open, skipping");
+        return;
+    }
+    dbg("openPanel() — building and showing panel");
     buildPanel();
     repositionPanel();
     panel.classList.add("open");
@@ -869,6 +1061,7 @@ function openPanel() {
 }
 
 function closePanel() {
+    dbg("closePanel()");
     panel.classList.remove("open");
     panelOpen = false;
     container.classList.remove("panel-active");
@@ -878,17 +1071,22 @@ function closePanel() {
    CONNECT GM MENU TO openPanel
 ═══════════════════════════════════════════ */
 _openPanelRef = openPanel;
+dbg("_openPanelRef wired to openPanel()");
 
 /* ═══════════════════════════════════════════
    PLACEHOLDER → tap opens settings
 ═══════════════════════════════════════════ */
 placeholder.addEventListener("click", e => {
     e.stopPropagation();
+    dbg("placeholder click → openPanel()");
     openPanel();
 });
 placeholder.addEventListener("touchend", e => {
     e.stopPropagation();
+    dbg("placeholder touchend → openPanel()");
     openPanel();
 }, { passive: true });
+
+dbg("✅ Mascot Overlay fully initialised");
 
 })();
