@@ -662,43 +662,51 @@ function applyMascot(key, fromPlaylist = false) {
 }
 
 /* ── Initial load ── */
-try {
-    const keys = getKeys();
-    if (!keys.length) {
-        syncPlaceholder();
-    } else {
-        // Resume playlist if one was active before the page refresh
-        const savedPlKey = state.activePlaylistKey;
+function doInitialLoad() {
+    try {
+        const keys = getKeys();
+        if (!keys.length) { syncPlaceholder(); return; }
+
+        // Fresh read from storage (not the cached `state` snapshot) so we always
+        // see whatever was last written — even if `state` was loaded before start() ran.
+        const freshState  = loadState();
+        const savedPlKey  = freshState.activePlaylistKey;
+        console.log("[Mascot] init — savedPlKey=", savedPlKey);
+
         if (savedPlKey) {
-            try {
-                const pl = JSON.parse(GM_getValue(savedPlKey, "null"));
-                if (pl && pl.items && pl.items.length) {
-                    const validKeys = new Set(keys);
-                    pl.items = pl.items.filter(item => validKeys.has(item.key));
-                    if (pl.items.length) {
-                        dbg("Auto-resuming playlist on load:", savedPlKey);
-                        playlistRuntime.start(pl);
-                    } else {
-                        saveState({ activePlaylistKey: null });
-                        applyMascot(state.activeMascotKey || keys[0]);
-                    }
-                } else {
-                    saveState({ activePlaylistKey: null });
-                    applyMascot(state.activeMascotKey || keys[0]);
+            // loadPlaylists() is the same path used by the panel UI — known to work
+            const allPl = loadPlaylists();
+            const pl    = allPl[savedPlKey];
+            console.log("[Mascot] init — playlist found=", !!pl, pl ? pl.name : "");
+
+            if (pl && Array.isArray(pl.items) && pl.items.length) {
+                const validKeys = new Set(keys);
+                pl.items = pl.items.filter(item => validKeys.has(item.key));
+                if (pl.items.length) {
+                    console.log("[Mascot] Auto-resuming playlist:", pl.name);
+                    playlistRuntime.start(pl);
+                    return;
                 }
-            } catch(e) {
-                saveState({ activePlaylistKey: null });
-                applyMascot(state.activeMascotKey || keys[0]);
             }
-        } else {
-            if (!keys.includes(state.activeMascotKey)) {
-                state.activeMascotKey = keys[0];
-                saveState({ activeMascotKey: keys[0] });
-            }
-            applyMascot(state.activeMascotKey);
+            // Playlist missing or all items invalid — clear flag, fall through
+            saveState({ activePlaylistKey: null });
         }
+
+        // Normal single-mascot load
+        const activeMascotKey = freshState.activeMascotKey;
+        if (!keys.includes(activeMascotKey)) {
+            state.activeMascotKey = keys[0];
+            saveState({ activeMascotKey: keys[0] });
+        } else {
+            state.activeMascotKey = activeMascotKey;
+        }
+        applyMascot(state.activeMascotKey);
+    } catch (e) {
+        console.warn("[Mascot] doInitialLoad error:", e);
+        syncPlaceholder();
     }
-} catch (e) { syncPlaceholder(); }
+}
+setTimeout(doInitialLoad, 0);
 
 document.addEventListener("visibilitychange", () => {
     img.style.animationPlayState = document.hidden ? "paused" : "running";
