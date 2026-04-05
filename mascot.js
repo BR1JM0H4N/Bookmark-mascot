@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Draggable Mascot Overlay
 // @namespace    mascot.overlay.android.v13
-// @version      13.3
-// @description  Floating mascot — tap placeholder to open settings on first run; single GM menu entry
+// @version      13.4
+// @description  Floating mascot — long-press to open settings; tap placeholder on first run
 // @match        *://*/*
 // @run-at       document-idle
 // @grant        GM_getValue
@@ -54,7 +54,7 @@ const dbg     = (...a) => { if (DEBUG) console.log(  "%c[Mascot DBG]", "color:#8
 const dbgWarn = (...a) => { if (DEBUG) console.warn( "%c[Mascot DBG]", "color:#f9e2af;font-weight:600", ...a); };
 const dbgErr  = (...a) => { if (DEBUG) console.error("%c[Mascot DBG]", "color:#f38ba8;font-weight:600", ...a); };
 
-dbg("Script initialising", { version: "13.3", url: location.href, DEBUG });
+dbg("Script initialising", { version: "13.4", url: location.href, DEBUG });
 
 /* ═══════════════════════════════════════════
    REGISTER GM MENU FIRST (before anything can fail)
@@ -183,10 +183,6 @@ styleEl.textContent = `
     30% { opacity:.08 } 45% { opacity:1  }
     60% { opacity:.04 } 100%{ opacity:1  }
 }
-@keyframes glow-pulse {
-    0%,100% { transform:scale(1);    }
-    50%     { transform:scale(1.08); }
-}
 @keyframes spin { to { transform:rotate(360deg); } }
 @keyframes panel-dn {
     from { opacity:0; transform:translateY(-6px) scaleY(.96); }
@@ -229,25 +225,6 @@ styleEl.textContent = `
     opacity: 0;
 }
 img.flicker-in { animation: flicker 600ms linear 1 forwards; }
-
-.glow {
-    position: absolute;
-    inset: -10px;
-    border-radius: 50%;
-    pointer-events: none;
-    opacity: 0;
-    transition: opacity .35s ease;
-    animation: glow-pulse 1.8s ease-in-out infinite;
-    animation-play-state: paused;
-    box-shadow:
-        0 0 14px rgba(0,200,255,.6),
-        0 0 32px rgba(0,160,255,.38),
-        0 0 60px rgba(0,120,255,.22);
-}
-#container.unlocked .glow {
-    opacity: 1;
-    animation-play-state: running;
-}
 
 #placeholder {
     display: none;
@@ -441,10 +418,6 @@ mwrap.id = "mwrap";
 const img = document.createElement("img");
 img.draggable = false;
 mwrap.appendChild(img);
-
-const glow = document.createElement("div");
-glow.className = "glow";
-mwrap.appendChild(glow);
 
 const placeholder = document.createElement("div");
 placeholder.id = "placeholder";
@@ -663,10 +636,11 @@ let isUnlocked = false;
             dbg("unlock() — already unlocked, skipping");
             return;
         }
-        dbg("unlock() — unlocking container, scheduling auto-lock in", LOCK_DELAY, "ms");
+        dbg("unlock() — unlocking container, opening panel, scheduling auto-lock in", LOCK_DELAY, "ms");
         isUnlocked = true;
         container.classList.add("unlocked");
         container.style.cursor = "grab";
+        openPanel();
         scheduleLock();
     }
 
