@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         Draggable Mascot Overlay
-// @namespace    mascot.overlay.android.v14
+// @name         Draggable Mascot
+// @namespace    mascot.overlay.android.v15
 // @version      14.0
 // @description  Floating mascot — long-press to open settings; playlists with per-item duration
 // @match        *://*/*
