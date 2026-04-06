@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Draggable Mascot
-// @namespace    mascot.overlay.android.v15
-// @version      14.0
+// @name         Draggable Mascot Overlay
+// @namespace    mascot.overlay.android.v14
+// @version      14.1
 // @description  Floating mascot — long-press to open settings; playlists with per-item duration
 // @match        *://*/*
 // @run-at       document-idle
@@ -51,7 +51,7 @@ const dbg     = (...a) => { if (DEBUG) console.log(  "%c[Mascot DBG]", "color:#8
 const dbgWarn = (...a) => { if (DEBUG) console.warn( "%c[Mascot DBG]", "color:#f9e2af;font-weight:600", ...a); };
 const dbgErr  = (...a) => { if (DEBUG) console.error("%c[Mascot DBG]", "color:#f38ba8;font-weight:600", ...a); };
 
-dbg("Script initialising", { version: "14.0", url: location.href, DEBUG });
+dbg("Script initialising", { version: "14.1", url: location.href, DEBUG });
 
 /* ═══════════════════════════════════════════
    REGISTER GM MENU
@@ -64,23 +64,33 @@ try {
         try { GM_setValue(CFG.debugKey, DEBUG); } catch (e) {}
         console.log(`[Mascot] Debug logging ${DEBUG ? "ENABLED ✅" : "DISABLED ❌"} — reload page to refresh menu label`);
     });
-} catch (e) { console.warn("[Mascot] GM_registerMenuCommand failed:", e); }
+} catch (e) { console.warn("[Mascot] GM_registerMenuCommand failed:", e); dbgErr("GM_registerMenuCommand threw", e); }
 
 /* ═══════════════════════════════════════════
    STATE
 ═══════════════════════════════════════════ */
 function loadState() {
     try {
-        return GM_getValue(CFG.stateKey, {
+        const s = GM_getValue(CFG.stateKey, {
             position: { left: CFG.defaultLeft, top: null },
             activeMascotKey: null
         });
+        dbg("loadState() →", JSON.stringify(s));
+        return s;
     } catch (e) {
+        dbgErr("loadState() threw — returning defaults", e);
         return { position: { left: CFG.defaultLeft, top: null }, activeMascotKey: null };
     }
 }
 function saveState(patch) {
-    try { GM_setValue(CFG.stateKey, { ...loadState(), ...patch }); } catch (e) { console.warn("[Mascot] saveState failed:", e); }
+    try {
+        const next = { ...loadState(), ...patch };
+        dbg("saveState() patch=", JSON.stringify(patch), "→ merged=", JSON.stringify(next));
+        GM_setValue(CFG.stateKey, next);
+    } catch (e) {
+        dbgErr("saveState() threw", e);
+        console.warn("[Mascot] saveState failed:", e);
+    }
 }
 const state = loadState();
 
@@ -99,23 +109,40 @@ function loadPlaylists() {
     const out = {};
     try {
         const all = typeof GM_listValues === 'function' ? (GM_listValues() || []) : [];
-        all.filter(k => k.startsWith(CFG.playlistPrefix)).forEach(k => {
+        const plKeys = all.filter(k => k.startsWith(CFG.playlistPrefix));
+        dbg("loadPlaylists() — found playlist keys:", plKeys);
+        plKeys.forEach(k => {
             try {
-                const pl = JSON.parse(GM_getValue(k, "null"));
-                if (pl && pl.name && Array.isArray(pl.items)) out[k] = pl;
-            } catch(e) {}
+                const raw = GM_getValue(k, "null");
+                const pl  = JSON.parse(raw);
+                if (pl && pl.name && Array.isArray(pl.items)) {
+                    dbg("loadPlaylists() loaded:", k, "items=", pl.items.length, "order=", pl.order);
+                    out[k] = pl;
+                } else {
+                    dbgWarn("loadPlaylists() skipped invalid entry key=", k, "parsed=", pl);
+                }
+            } catch(e) { dbgErr("loadPlaylists() parse error for key=", k, e); }
         });
-    } catch(e) {}
+    } catch(e) { dbgErr("loadPlaylists() outer error", e); }
+    dbg("loadPlaylists() returning", Object.keys(out).length, "playlist(s)");
     return out;
 }
 function savePlaylist(pl) {
-    // pl.name must be slug-safe
     const key = CFG.playlistPrefix + pl.name;
-    try { GM_setValue(key, JSON.stringify(pl)); } catch(e) { console.warn("[Mascot] savePlaylist failed", e); }
+    dbg("savePlaylist() key=", key, "items=", pl.items.length, "order=", pl.order);
+    try {
+        GM_setValue(key, JSON.stringify(pl));
+        dbg("savePlaylist() ✓ saved", key);
+    } catch(e) {
+        dbgErr("savePlaylist() GM_setValue threw for key=", key, e);
+        console.warn("[Mascot] savePlaylist failed", e);
+    }
     return key;
 }
 function deletePlaylist(key) {
-    try { GM_deleteValue(key); } catch(e) {}
+    dbg("deletePlaylist() key=", key);
+    try { GM_deleteValue(key); dbg("deletePlaylist() ✓ deleted", key); }
+    catch(e) { dbgErr("deletePlaylist() GM_deleteValue threw", e); }
 }
 
 /* ═══════════════════════════════════════════
@@ -129,14 +156,20 @@ const playlistRuntime = {
     usedIndices: [],
 
     start(pl) {
+        dbg("playlist.start() called — name=", pl?.name, "items=", pl?.items?.length, "order=", pl?.order);
         this.stop();
-        if (!pl || !pl.items.length) return;
-        this.active   = true;
-        this.playlist = pl;
-        this.idx      = 0;
+        if (!pl || !pl.items.length) {
+            dbgWarn("playlist.start() aborted — no valid items");
+            return;
+        }
+        this.active      = true;
+        this.playlist    = pl;
+        this.idx         = 0;
         this.usedIndices = [];
-        saveState({ activePlaylistKey: CFG.playlistPrefix + pl.name });
-        dbg("playlist.start()", pl.name, "order=", pl.order, "items=", pl.items.length);
+        const plKey = CFG.playlistPrefix + pl.name;
+        dbg("playlist.start() saving activePlaylistKey=", plKey);
+        saveState({ activePlaylistKey: plKey });
+        dbg("playlist.start() ✓ state saved — calling _playNext()");
         this._playNext();
     },
 
@@ -146,13 +179,17 @@ const playlistRuntime = {
         let idx;
 
         if (this.playlist.order === "random") {
-            // Fisher-Yates-style: exhaust all indices before repeating
-            if (this.usedIndices.length >= items.length) this.usedIndices = [];
+            if (this.usedIndices.length >= items.length) {
+                dbg("playlist._playNext() random — full cycle done, resetting usedIndices");
+                this.usedIndices = [];
+            }
             const remaining = items.map((_,i) => i).filter(i => !this.usedIndices.includes(i));
             idx = remaining[Math.floor(Math.random() * remaining.length)];
             this.usedIndices.push(idx);
+            dbg("playlist._playNext() random — remaining=", remaining, "picked idx=", idx);
         } else {
             idx = this.idx % items.length;
+            dbg("playlist._playNext() sequence — this.idx=", this.idx, "→ slot=", idx);
             this.idx++;
         }
 
@@ -166,13 +203,15 @@ const playlistRuntime = {
     },
 
     stop() {
-        if (this.timer) { clearTimeout(this.timer); this.timer = null; }
-        this.active   = false;
-        this.playlist = null;
-        this.idx      = 0;
+        dbg("playlist.stop() called — active=", this.active, "timer=", !!this.timer);
+        if (this.timer) { clearTimeout(this.timer); this.timer = null; dbg("playlist.stop() timer cleared"); }
+        this.active      = false;
+        this.playlist    = null;
+        this.idx         = 0;
         this.usedIndices = [];
+        dbg("playlist.stop() saving activePlaylistKey=null to state");
         saveState({ activePlaylistKey: null });
-        dbg("playlist.stop()");
+        dbg("playlist.stop() ✓ complete");
         updatePlaylistProgressUI(-1);
     },
 
@@ -183,16 +222,30 @@ const playlistRuntime = {
    NETWORK
 ═══════════════════════════════════════════ */
 function fetchBlob(url) {
+    dbg("fetchBlob() → url=", url);
     return new Promise((res, rej) =>
         GM_xmlhttpRequest({
             method: "GET", url, responseType: "blob",
-            onload:  r  => r.status === 200 ? res(r.response) : rej(new Error("HTTP " + r.status)),
-            onerror: err => rej(err)
+            onload: r => {
+                if (r.status === 200) {
+                    dbg("fetchBlob() ✓ HTTP 200 size≈", r.response?.size, "bytes");
+                    res(r.response);
+                } else {
+                    dbgErr("fetchBlob() ✗ HTTP", r.status, "url=", url);
+                    rej(new Error("HTTP " + r.status));
+                }
+            },
+            onerror: err => { dbgErr("fetchBlob() network error", err, "url=", url); rej(err); }
         })
     );
 }
 function toBase64(blob) {
-    return new Promise(res => { const r = new FileReader(); r.onloadend = () => res(r.result); r.readAsDataURL(blob); });
+    dbg("toBase64() blob.size=", blob?.size);
+    return new Promise(res => {
+        const r = new FileReader();
+        r.onloadend = () => { dbg("toBase64() ✓ dataURL length=", r.result?.length); res(r.result); };
+        r.readAsDataURL(blob);
+    });
 }
 
 /* ═══════════════════════════════════════════
@@ -201,19 +254,23 @@ function toBase64(blob) {
 const getKeys = () => {
     try {
         const vals = typeof GM_listValues === 'function' ? GM_listValues() : [];
-        return (vals || []).filter(k => k.startsWith(CFG.prefix)
-                                     && !k.startsWith(CFG.playlistPrefix)
-                                     && k !== CFG.stateKey
-                                     && k !== CFG.sizeKey
-                                     && k !== CFG.debugKey);
-    } catch (e) { return []; }
+        const keys = (vals || []).filter(k => k.startsWith(CFG.prefix)
+                                           && !k.startsWith(CFG.playlistPrefix)
+                                           && k !== CFG.stateKey
+                                           && k !== CFG.sizeKey
+                                           && k !== CFG.debugKey);
+        dbg("getKeys() →", keys);
+        return keys;
+    } catch (e) { dbgErr("getKeys() threw", e); return []; }
 };
 const getName  = k  => k ? k.slice(CFG.prefix.length) : "";
 const cycleKey = (cur, dir) => {
     const k = getKeys();
-    if (!k.length) return null;
-    let i = k.indexOf(cur);
-    return k[i < 0 ? 0 : (i + dir + k.length) % k.length];
+    if (!k.length) { dbgWarn("cycleKey() — no keys, returning null"); return null; }
+    let i   = k.indexOf(cur);
+    const next = k[i < 0 ? 0 : (i + dir + k.length) % k.length];
+    dbg("cycleKey() cur=", cur, "dir=", dir, "→", next);
+    return next;
 };
 const slugify  = s => s.trim().replace(/[^\w]/g, "_").slice(0, 40);
 
@@ -636,6 +693,7 @@ container.style.cssText = `
 ═══════════════════════════════════════════ */
 function syncPlaceholder() {
     const empty = !getKeys().length;
+    dbg("syncPlaceholder() empty=", empty);
     placeholder.classList.toggle("visible", empty);
     placeholder.style.pointerEvents = empty ? "auto" : "none";
 }
@@ -644,19 +702,22 @@ function syncPlaceholder() {
    MASCOT APPLICATION
 ═══════════════════════════════════════════ */
 function applyMascot(key, fromPlaylist = false) {
-    // If a playlist is running and this call is NOT from the playlist, stop the playlist
+    dbg("applyMascot() key=", key, "fromPlaylist=", fromPlaylist);
     if (!fromPlaylist && playlistRuntime.isActive()) {
+        dbg("applyMascot() — manual switch while playlist active → stopping playlist");
         playlistRuntime.stop();
         refreshPlaylistUI();
     }
     let src;
-    try { src = GM_getValue(key); } catch (e) { return; }
-    if (!src) return;
+    try { src = GM_getValue(key); } catch (e) { dbgErr("applyMascot() GM_getValue threw for key=", key, e); return; }
+    if (!src) { dbgWarn("applyMascot() no data for key=", key, "— skipping"); return; }
+    dbg("applyMascot() src length=", src.length, "chars — setting img.src");
     state.activeMascotKey = key;
     saveState({ activeMascotKey: key });
     img.style.opacity = "0";
     img.src = src;
-    img.onload = () => { img.classList.remove("flicker-in"); void img.offsetWidth; img.classList.add("flicker-in"); };
+    img.onload  = () => { dbg("applyMascot() img.onload — flicker-in for key=", key); img.classList.remove("flicker-in"); void img.offsetWidth; img.classList.add("flicker-in"); };
+    img.onerror = () => { dbgErr("applyMascot() img.onerror — dataURL may be corrupt for key=", key); };
     syncPlaceholder();
     refreshPanel();
 }
@@ -671,24 +732,30 @@ function doInitialLoad() {
         // see whatever was last written — even if `state` was loaded before start() ran.
         const freshState  = loadState();
         const savedPlKey  = freshState.activePlaylistKey;
-        console.log("[Mascot] init — savedPlKey=", savedPlKey);
+        dbg("doInitialLoad() — freshState=", JSON.stringify({activeMascotKey: freshState.activeMascotKey, activePlaylistKey: freshState.activePlaylistKey, position: freshState.position}));
+        dbg("doInitialLoad() — mascot keys found=", keys);
+        dbg("doInitialLoad() — savedPlKey=", savedPlKey);
 
         if (savedPlKey) {
             // loadPlaylists() is the same path used by the panel UI — known to work
             const allPl = loadPlaylists();
             const pl    = allPl[savedPlKey];
-            console.log("[Mascot] init — playlist found=", !!pl, pl ? pl.name : "");
+            dbg("doInitialLoad() — all playlist keys=", Object.keys(allPl));
+            dbg("doInitialLoad() — playlist found=", !!pl, pl ? ("name=" + pl.name + " items=" + pl.items?.length) : "MISSING");
 
             if (pl && Array.isArray(pl.items) && pl.items.length) {
                 const validKeys = new Set(keys);
                 pl.items = pl.items.filter(item => validKeys.has(item.key));
+                dbg("doInitialLoad() — valid items after filtering=", pl.items.length);
                 if (pl.items.length) {
-                    console.log("[Mascot] Auto-resuming playlist:", pl.name);
+                    dbg("doInitialLoad() ✓ Auto-resuming playlist:", pl.name, "with", pl.items.length, "item(s)");
                     playlistRuntime.start(pl);
                     return;
                 }
+                dbgWarn("doInitialLoad() — all playlist items were invalid (mascots deleted), clearing activePlaylistKey");
             }
             // Playlist missing or all items invalid — clear flag, fall through
+            dbgWarn("doInitialLoad() — playlist key existed but playlist unresolvable, clearing");
             saveState({ activePlaylistKey: null });
         }
 
@@ -700,15 +767,21 @@ function doInitialLoad() {
         } else {
             state.activeMascotKey = activeMascotKey;
         }
+        dbg("doInitialLoad() — single mascot mode, loading:", state.activeMascotKey);
         applyMascot(state.activeMascotKey);
     } catch (e) {
+        dbgErr("doInitialLoad() threw", e);
         console.warn("[Mascot] doInitialLoad error:", e);
         syncPlaceholder();
     }
 }
+dbg("Scheduling doInitialLoad via setTimeout(0)");
 setTimeout(doInitialLoad, 0);
 
+dbg("✅ Mascot Overlay v14.1 fully wired — all handlers attached");
+
 document.addEventListener("visibilitychange", () => {
+    dbg("visibilitychange — hidden=", document.hidden);
     img.style.animationPlayState = document.hidden ? "paused" : "running";
 });
 
@@ -737,12 +810,14 @@ function endDrag() {
     dragging = false;
     const r = container.getBoundingClientRect();
     let l = r.left, t = r.top;
-    if (l                     < CFG.snapDist) l = 0;
-    if (innerWidth  - r.right < CFG.snapDist) l = innerWidth  - r.width;
-    if (t                     < CFG.snapDist) t = 0;
-    if (innerHeight - r.bottom< CFG.snapDist) t = innerHeight - r.height;
+    const snapped = { l: false, r: false, t: false, b: false };
+    if (l                      < CFG.snapDist) { l = 0;                     snapped.l = true; }
+    if (innerWidth  - r.right  < CFG.snapDist) { l = innerWidth - r.width;  snapped.r = true; }
+    if (t                      < CFG.snapDist) { t = 0;                     snapped.t = true; }
+    if (innerHeight - r.bottom < CFG.snapDist) { t = innerHeight - r.height;snapped.b = true; }
     container.style.left = l + "px";
     container.style.top  = t + "px";
+    dbg("endDrag() final l=", l, "t=", t, "snapped=", JSON.stringify(snapped));
     saveState({ position: { left: l, top: t } });
 }
 container.addEventListener("mousedown",  e => startDrag(e.clientX, e.clientY, e.target));
@@ -761,7 +836,8 @@ let isUnlocked = false;
     const LOCK_DELAY = 3000, LONG_PRESS = 700;
     let lockTimer, pressTimer, pressing = false;
     function lock() {
-        if (panelOpen) { scheduleLock(); return; }
+        if (panelOpen) { dbg("lock() deferred — panel open"); scheduleLock(); return; }
+        dbg("lock() — locking container");
         isUnlocked = false;
         container.classList.remove("unlocked", "panel-active");
         container.style.cursor = "default";
@@ -769,7 +845,8 @@ let isUnlocked = false;
         placeholder.style.pointerEvents = "auto";
     }
     function unlock() {
-        if (isUnlocked) return;
+        if (isUnlocked) { dbg("unlock() — already unlocked, skipping"); return; }
+        dbg("unlock() — unlocking, opening panel, scheduling lock in", LOCK_DELAY, "ms");
         isUnlocked = true;
         container.classList.add("unlocked");
         container.style.cursor = "grab";
@@ -783,9 +860,10 @@ let isUnlocked = false;
     }
     function startPress(x, y) {
         if (isUnlocked || !inside(x, y)) return;
+        dbg("startPress() — long-press timer started, fires in", LONG_PRESS, "ms");
         pressing = true;
         clearTimeout(pressTimer);
-        pressTimer = setTimeout(() => { if (pressing) unlock(); }, LONG_PRESS);
+        pressTimer = setTimeout(() => { if (pressing) { dbg("startPress() long-press threshold reached → unlock()"); unlock(); } }, LONG_PRESS);
     }
     function cancelPress() { pressing = false; clearTimeout(pressTimer); }
     document.addEventListener("touchstart", e => startPress(e.touches[0].clientX, e.touches[0].clientY), true);
@@ -806,11 +884,12 @@ let isUnlocked = false;
 ═══════════════════════════════════════════ */
 function exportMascots() {
     const keys = getKeys();
+    dbg("exportMascots() mascot keys=", keys);
     if (!keys.length) { alert("No mascots saved yet."); return; }
 
     const payload = {};
     // mascot images
-    keys.forEach(k => { try { payload[k] = GM_getValue(k); } catch(e) {} });
+    keys.forEach(k => { try { payload[k] = GM_getValue(k); dbg("exportMascots() included mascot key=", k); } catch(e) { dbgErr("exportMascots() failed to read key=", k, e); } });
     // playlists
     try {
         const all = typeof GM_listValues === 'function' ? (GM_listValues() || []) : [];
@@ -824,6 +903,7 @@ function exportMascots() {
     const a = document.createElement("a");
     a.href = url; a.download = "mascots_" + new Date().toISOString().slice(0,10) + ".json";
     document.body.appendChild(a); a.click(); a.remove();
+    dbg("exportMascots() download triggered, filename=", a.download, "total keys=", Object.keys(payload).length);
     setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
@@ -834,17 +914,24 @@ function importMascots(afterImport) {
     document.body.appendChild(input);
     input.onchange = async () => {
         const file = input.files[0]; input.remove();
-        if (!file) return;
+        if (!file) { dbgWarn("importMascots() — no file selected"); return; }
+        dbg("importMascots() file=", file.name, "size=", file.size, "bytes");
         try {
             const data = JSON.parse(await file.text());
+            dbg("importMascots() parsed JSON, top-level keys=", Object.keys(data));
             let count = 0, plCount = 0;
             for (const [k, v] of Object.entries(data)) {
                 if (k.startsWith(CFG.playlistPrefix) && typeof v === "string") {
-                    try { GM_setValue(k, v); plCount++; } catch(e) {}
+                    try { GM_setValue(k, v); plCount++; dbg("importMascots() stored playlist key=", k); }
+                    catch(e) { dbgErr("importMascots() failed to store playlist key=", k, e); }
                 } else if (k.startsWith(CFG.prefix) && typeof v === "string") {
-                    try { GM_setValue(k, v); count++; } catch(e) {}
+                    try { GM_setValue(k, v); count++; dbg("importMascots() stored mascot key=", k, "dataURL length=", v.length); }
+                    catch(e) { dbgErr("importMascots() failed to store mascot key=", k, e); }
+                } else {
+                    dbgWarn("importMascots() skipped entry key=", k, "type=", typeof v);
                 }
             }
+            dbg("importMascots() done — mascots=", count, "playlists=", plCount);
             alert(`Imported ${count} mascot(s) and ${plCount} playlist(s).`);
             if (!state.activeMascotKey || !GM_getValue(state.activeMascotKey)) {
                 const keys = getKeys();
@@ -852,7 +939,7 @@ function importMascots(afterImport) {
             }
             syncPlaceholder();
             afterImport?.();
-        } catch (err) { alert("Import failed — make sure it's a valid mascot backup JSON."); }
+        } catch (err) { dbgErr("importMascots() parse/process error:", err); alert("Import failed — make sure it's a valid mascot backup JSON."); }
     };
     input.click();
 }
@@ -902,9 +989,11 @@ let _plNowIdx     = null;
 let _plBarAnim    = null;  // running CSS animation cancel fn
 
 function updatePlaylistProgressUI(activeIdx, durMs) {
+    dbg("updatePlaylistProgressUI() idx=", activeIdx, "durMs=", durMs, "hasEl=", !!_plProgressEl);
     if (!_plProgressEl) return;
     const pl = playlistRuntime.playlist;
     if (!pl || activeIdx < 0) {
+        dbg("updatePlaylistProgressUI() — hiding bar (no playlist or idx<0)");
         _plProgressEl.classList.remove("visible");
         if (_plBarFill) _plBarFill.style.width = "0%";
         return;
@@ -925,7 +1014,7 @@ function updatePlaylistProgressUI(activeIdx, durMs) {
 }
 
 function refreshPlaylistUI() {
-    // Update play/stop button state and progress bar visibility in current panel
+    dbg("refreshPlaylistUI() — panelOpen=", panelOpen, "playlistActive=", playlistRuntime.isActive());
     if (!panelOpen) return;
     const bStop = panel.querySelector("#pl-stop-btn");
     const bPlay = panel.querySelector("#pl-play-btn");
@@ -953,6 +1042,7 @@ let editorState = {
    PANEL BUILDER
 ═══════════════════════════════════════════ */
 function buildPanel() {
+    dbg("buildPanel() — rebuilding panel, isEmpty=", !getKeys().length, "editorState.open=", editorState.open, "playlistActive=", playlistRuntime.isActive());
     panel.innerHTML = "";
     _plProgressEl = null; _plBarFill = null; _plNowName = null; _plNowIdx = null;
 
@@ -1173,18 +1263,20 @@ function buildPanel() {
    PLAYLIST EDITOR CONTENT
 ═══════════════════════════════════════════ */
 function openNewPlaylistEditor() {
-    editorState.open = true;
+    dbg("openNewPlaylistEditor()");
+    editorState.open      = true;
     editorState.editingKey = null;
-    editorState.items = [];
-    editorState.order = "sequence";
+    editorState.items     = [];
+    editorState.order     = "sequence";
     buildPanel();
     repositionPanel();
 }
 function openEditPlaylistEditor(key, pl) {
-    editorState.open = true;
+    dbg("openEditPlaylistEditor() key=", key, "items=", pl.items.length, "order=", pl.order);
+    editorState.open      = true;
     editorState.editingKey = key;
-    editorState.items = pl.items.map(i => ({ ...i }));
-    editorState.order = pl.order || "sequence";
+    editorState.items     = pl.items.map(i => ({ ...i }));
+    editorState.order     = pl.order || "sequence";
     buildPanel();
     repositionPanel();
 }
@@ -1430,13 +1522,15 @@ function refreshPanel() {
 function repositionPanel() {
     const r = container.getBoundingClientRect();
     const flip = r.bottom > innerHeight * 0.55;
-    panel.classList.toggle("flip", flip);
     const rightOverflow = r.left + 220 > innerWidth - 8;
+    dbg("repositionPanel() flip=", flip, "rightOverflow=", rightOverflow, "r.bottom=", Math.round(r.bottom), "innerHeight=", innerHeight);
+    panel.classList.toggle("flip", flip);
     panel.style.left  = rightOverflow ? "auto" : "0";
     panel.style.right = rightOverflow ? "0"    : "auto";
 }
 function openPanel() {
-    if (panelOpen) return;
+    if (panelOpen) { dbg("openPanel() — already open, skipping"); return; }
+    dbg("openPanel() — building and showing panel");
     buildPanel();
     repositionPanel();
     panel.classList.add("open");
@@ -1445,6 +1539,7 @@ function openPanel() {
     panel.style.pointerEvents = "auto";
 }
 function closePanel() {
+    dbg("closePanel()");
     panel.classList.remove("open");
     panelOpen = false;
     container.classList.remove("panel-active");
@@ -1453,8 +1548,8 @@ function closePanel() {
 
 _openPanelRef = openPanel;
 
-placeholder.addEventListener("click",    e => { e.stopPropagation(); openPanel(); });
-placeholder.addEventListener("touchend", e => { e.stopPropagation(); openPanel(); }, { passive: true });
+placeholder.addEventListener("click",    e => { e.stopPropagation(); dbg("placeholder click → openPanel()"); openPanel(); });
+placeholder.addEventListener("touchend", e => { e.stopPropagation(); dbg("placeholder touchend → openPanel()"); openPanel(); }, { passive: true });
 
 dbg("✅ Mascot Overlay v14.0 fully initialised — playlists enabled");
 
